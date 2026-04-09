@@ -1,0 +1,28 @@
+.env
+.env.*
+!.env.example
+node_modules
+
+# Local runtime state / transcripts / dumps (can contain prompts, tool outputs, local paths)
+.claude-go/
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+
+# Go build artifacts / coverage
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+*.cover
+
+# Logs
+*.log
