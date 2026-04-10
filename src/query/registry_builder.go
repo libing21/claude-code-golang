@@ -125,7 +125,39 @@ func (b DefaultRegistryBuilder) Build(ctx context.Context, cfg QueryEngineConfig
 			},
 			DepthLimit: 1,
 		}),
-		skill.New(cfg.SkillDirs),
+		skill.NewWithConfig(skill.Config{
+			Dirs:             cfg.SkillDirs,
+			BaseSystemPrompt: systemPrompt,
+			ParentModel:      resolveModel(cfg),
+			ParentMode:       cfg.PermissionMode,
+			Run: func(ctx context.Context, opts skill.RunOptions) (string, error) {
+				childCfg := QueryEngineConfig{
+					Client:          cfg.Client,
+					SystemPrompt:    opts.SystemPrompt,
+					PermissionMode:  opts.PermissionMode,
+					AllowedTools:    opts.AllowedTools,
+					DisallowedTools: opts.DisallowedTools,
+					MCPConfigPath:   cfg.MCPConfigPath,
+					PluginDirs:      cfg.PluginDirs,
+					SkillDirs:       cfg.SkillDirs,
+					Debug:           cfg.Debug,
+					MessagesDumpDir: cfg.MessagesDumpDir,
+					ModelOverride:   opts.Model,
+					MaxSteps:        opts.MaxTurns,
+					RegistryBuilder: cfg.RegistryBuilder,
+					ModelResolver:   cfg.ModelResolver,
+					DiscoveredToolsPath:        cfg.DiscoveredToolsPath,
+					MaxDiscoveredDeferredTools: cfg.MaxDiscoveredDeferredTools,
+					TranscriptPath:             cfg.TranscriptPath,
+					ResumeTranscript:           cfg.ResumeTranscript,
+				}
+				out, err := NewQueryEngine(childCfg).RunOnce(ctx, opts.UserPrompt)
+				if err != nil {
+					return "", err
+				}
+				return out.Text, nil
+			},
+		}),
 	})
 
 	// ToolSearch should discover only deferred tools (currently MCP tools), and it must reflect

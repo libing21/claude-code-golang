@@ -29,19 +29,19 @@ type QueryEngine struct {
 	cfg QueryEngineConfig
 
 	// Turn state (mirrors TS QueryEngine owning mutable messages/context).
-	reg           *tools.Registry
-	permCtx       tool.PermissionContext
-	attachmentReg *attachments.Registry
-	msgs          []api.Message
+	reg             *tools.Registry
+	permCtx         tool.PermissionContext
+	attachmentReg   *attachments.Registry
+	msgs            []api.Message
 	lastEmittedDate string
 
-	exposedTools []tool.Tool
-	exposure     toolExposure
-	orch         *toolruntime.ToolOrchestration
-	transcript   TranscriptStore
-	toolBudget   *ToolBudgetState
-	budgetTracker *BudgetTracker
-	lastFileWriteBatchFailed bool
+	exposedTools              []tool.Tool
+	exposure                  toolExposure
+	orch                      *toolruntime.ToolOrchestration
+	transcript                TranscriptStore
+	toolBudget                *ToolBudgetState
+	budgetTracker             *BudgetTracker
+	lastFileWriteBatchFailed  bool
 	lastFileWriteFailSnippets []string
 
 	// systemPrompt is mutable because MCP instructions section may be replaced.
@@ -76,8 +76,8 @@ type QueryEngineConfig struct {
 	TranscriptPath   string
 	ResumeTranscript bool
 
-	StopHookRunner           StopHookRunner
-	TokenBudgetTokens        int
+	StopHookRunner            StopHookRunner
+	TokenBudgetTokens         int
 	AutoCompactTokenThreshold int
 	AutoCompactKeepMessages   int
 }
@@ -170,8 +170,17 @@ func (e *QueryEngine) initPermissionContext() {
 	switch strings.ToLower(strings.TrimSpace(e.cfg.PermissionMode)) {
 	case "bypass":
 		permMode = tool.PermissionModeBypass
+	case "dontask", "dont_ask":
+		// TS "dontAsk": run without interactive prompts.
+		permMode = tool.PermissionModeBypass
 	case "ask":
 		permMode = tool.PermissionModeAsk
+	case "plan", "bubble":
+		// TS has more nuanced modes; for Go runtime we treat them as "ask" so
+		// sensitive tools are not auto-executed.
+		permMode = tool.PermissionModeAsk
+	case "accepted-edits", "accepted_edits", "accepteddits", "accept_edits":
+		permMode = tool.PermissionModeDefault
 	case "default", "":
 		permMode = tool.PermissionModeDefault
 	}
@@ -273,7 +282,7 @@ func (e *QueryEngine) step(ctx context.Context, step int, finalTexts *[]string) 
 		e.lastEmittedDate = currentDate
 	}
 	if e.cfg.Debug {
-		fmt.Fprintf(os.Stderr, "[debug] step=%d messages=%d\n", step, len(e.msgs))
+		fmt.Fprintf(os.Stderr, "[debug] step=%d messages=%v\n", step, e.msgs)
 	}
 
 	modelUsed := e.modelUsedForTurn()

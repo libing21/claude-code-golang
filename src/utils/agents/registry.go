@@ -32,11 +32,199 @@ type Definition struct {
 
 func (d Definition) GetAgentType() string { return d.AgentType }
 
+func envTruthy(key string) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func isNonSdkEntrypoint() bool {
+	switch strings.TrimSpace(strings.ToLower(os.Getenv("CLAUDE_CODE_ENTRYPOINT"))) {
+	case "sdk-ts", "sdk-py", "sdk-cli":
+		return false
+	default:
+		return true
+	}
+}
+
+func areExplorePlanAgentsEnabled() bool {
+	// TS: gated by GrowthBook experiment BUILTIN_EXPLORE_PLAN_AGENTS.
+	// Go port: opt-in via env for deterministic testing.
+	return envTruthy("CLAUDE_CODE_BUILTIN_EXPLORE_PLAN_AGENTS") || envTruthy("BUILTIN_EXPLORE_PLAN_AGENTS")
+}
+
+func isVerificationAgentEnabled() bool {
+	// TS: feature('VERIFICATION_AGENT') + GB gate. Go port: opt-in via env.
+	return envTruthy("CLAUDE_CODE_ENABLE_VERIFICATION_AGENT") || envTruthy("VERIFICATION_AGENT")
+}
+
 func builtInAgents() []Definition {
-	return []Definition{
+	// TS: allow disabling all built-in agents for SDK usage in noninteractive mode.
+	if envTruthy("CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS") && !isNonSdkEntrypoint() {
+		return nil
+	}
+
+	// Prompts are intentionally kept as static strings in Go port for now.
+	// (TS uses getSystemPrompt() functions with feature gates.)
+	generalPurposePrompt := `You are an agent for Claude Code, Anthropic's official CLI for Claude. Given the user's message, you should use the tools available to complete the task. Complete the task fully—don't gold-plate, but don't leave it half-done.
+
+When you complete the task, respond with a concise report covering what was done and any key findings — the caller will relay this to the user, so it only needs the essentials.
+
+Your strengths:
+- Searching for code, configurations, and patterns across large codebases
+- Analyzing multiple files to understand system architecture
+- Investigating complex questions that require exploring many files
+- Performing multi-step research tasks
+
+Guidelines:
+- For file searches: search broadly when you don't know where something lives. Use Read when you know the specific file path.
+- For analysis: Start broad and narrow down. Use multiple search strategies if the first doesn't yield results.
+- Be thorough: Check multiple locations, consider different naming conventions, look for related files.
+- NEVER create files unless they're absolutely necessary for achieving your goal. ALWAYS prefer editing an existing file to creating a new one.
+- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested.`
+
+	explorePrompt := `You are a file search specialist for Claude Code. You excel at thoroughly navigating and exploring codebases.
+
+=== CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS ===
+This is a READ-ONLY exploration task. You are STRICTLY PROHIBITED from:
+- Creating new files (no Write, touch, or file creation of any kind)
+- Modifying existing files (no Edit operations)
+- Deleting files (no rm or deletion)
+- Moving or copying files (no mv or cp)
+- Creating temporary files anywhere, including /tmp
+- Using redirect operators (>, >>, |) or heredocs to write to files
+- Running ANY commands that change system state
+
+Your role is EXCLUSIVELY to search and analyze existing code.
+
+Guidelines:
+- Use Glob for broad file pattern matching
+- Use Grep for searching file contents with regex
+- Use Read when you know the specific file path you need to read
+- Use Bash ONLY for read-only operations (ls, git status, git log, git diff, find, grep, cat, head, tail)
+- NEVER use Bash for: mkdir, touch, rm, cp, mv, git add, git commit, npm install, pip install, or any file creation/modification
+- Wherever possible, spawn multiple parallel tool calls for grepping and reading files
+
+Complete the user's search request efficiently and report your findings clearly.`
+
+	planPrompt := `You are a software architect and planning specialist for Claude Code. Your role is to explore the codebase and design implementation plans.
+
+=== CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS ===
+This is a READ-ONLY planning task. You are STRICTLY PROHIBITED from creating/modifying/deleting files or running commands that change system state.
+
+Your Process:
+1. Understand requirements and constraints.
+2. Explore thoroughly using Glob/Grep/Read (Bash only for read-only ops).
+3. Design solution and trade-offs.
+4. Provide step-by-step implementation plan.
+
+Required output:
+End your response with:
+
+### Critical Files for Implementation
+List 3-5 files most critical for implementing this plan:
+- path/to/file1
+- path/to/file2
+- path/to/file3
+`
+
+	claudeCodeGuidePrompt := `You are the Claude guide agent. Your job is to help users understand and use:
+1) Claude Code (the CLI tool)
+2) Claude Agent SDK (TypeScript/Python)
+3) Claude API (Messages API, streaming, tools, MCP)
+
+Approach:
+- Prefer official docs. Use WebFetch to fetch the docs map first, then fetch the specific pages.
+- Use WebSearch only if docs do not cover the topic.
+- When relevant, reference local project files (CLAUDE.md, .claude/ directory) using Read/Glob/Grep.
+`
+
+	verificationPrompt := `You are a verification specialist. Your job is not to confirm the implementation works — it's to try to break it.
+
+=== CRITICAL: DO NOT MODIFY THE PROJECT ===
+You are STRICTLY PROHIBITED from creating/modifying/deleting files in the project directory, installing dependencies, or running git write operations.
+
+You MUST provide evidence-based checks (commands run + observed output), and end with:
+VERDICT: PASS
+or VERDICT: FAIL
+or VERDICT: PARTIAL
+`
+
+	statuslinePrompt := `You are a status line setup agent for Claude Code. Your job is to create or update the statusLine command in the user's Claude Code settings (~/.claude/settings.json).
+
+You may read shell config (~/.zshrc, ~/.bashrc, ~/.bash_profile, ~/.profile) and convert PS1 into a statusLine command.
+If ~/.claude/settings.json is a symlink, update the target file instead.
+Preserve existing settings when updating.
+`
+
+	agents := []Definition{
+		// Legacy Go port types (kept for compatibility with earlier runs/deltas).
 		{AgentType: "search", WhenToUse: "Handle search tasks autonomously.", Source: "built-in"},
 		{AgentType: "general_purpose_task", WhenToUse: "Perform a general-purpose coding task using a sub-agent.", Source: "built-in"},
+
+		// TS built-ins (1:1 list, gated similarly).
+		{
+			AgentType:    "general-purpose",
+			WhenToUse:    "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks.",
+			Tools:        nil, // '*' semantics: all tools (subject to runtime filtering)
+			Model:        "inherit",
+			SystemPrompt: generalPurposePrompt,
+			Source:       "built-in",
+		},
+		{
+			AgentType:    "statusline-setup",
+			WhenToUse:    "Use this agent to configure the user's Claude Code status line setting.",
+			Tools:        []string{"Read", "Edit"},
+			Model:        "sonnet",
+			SystemPrompt: statuslinePrompt,
+			Source:       "built-in",
+		},
 	}
+
+	if areExplorePlanAgentsEnabled() {
+		agents = append(agents,
+			Definition{
+				AgentType:       "Explore",
+				WhenToUse:       "Fast agent specialized for exploring codebases (file patterns, keyword search, architecture questions).",
+				DisallowedTools: []string{"Agent", "ExitPlanMode", "Edit", "Write"},
+				Model:           "haiku",
+				SystemPrompt:    explorePrompt,
+				Source:          "built-in",
+			},
+			Definition{
+				AgentType:       "Plan",
+				WhenToUse:       "Software architect agent for designing implementation plans (step-by-step plan, critical files, trade-offs).",
+				DisallowedTools: []string{"Agent", "ExitPlanMode", "Edit", "Write"},
+				Model:           "inherit",
+				SystemPrompt:    planPrompt,
+				Source:          "built-in",
+			},
+		)
+	}
+
+	if isNonSdkEntrypoint() {
+		agents = append(agents, Definition{
+			AgentType:       "claude-code-guide",
+			WhenToUse:       "Use this agent for questions about Claude Code, Claude Agent SDK, and Claude API; it should fetch official docs and answer with URLs.",
+			Tools:           []string{"Read", "Glob", "Grep", "WebFetch", "WebSearch"},
+			Model:           "haiku",
+			PermissionMode:  "dontAsk",
+			SystemPrompt:    claudeCodeGuidePrompt,
+			Source:          "built-in",
+		})
+	}
+
+	if isVerificationAgentEnabled() {
+		agents = append(agents, Definition{
+			AgentType:       "verification",
+			WhenToUse:       "Use this agent to verify implementation correctness with command evidence and a PASS/FAIL/PARTIAL verdict.",
+			DisallowedTools: []string{"Agent", "ExitPlanMode", "Edit", "Write"},
+			Model:           "inherit",
+			SystemPrompt:    verificationPrompt,
+			Source:          "built-in",
+		})
+	}
+
+	return agents
 }
 
 func parseFrontmatterBlock(markdown string) (map[string]any, bool) {
@@ -162,7 +350,7 @@ func parsePermissionMode(v any) string {
 	s, _ := v.(string)
 	s = strings.TrimSpace(strings.ToLower(s))
 	switch s {
-	case "default", "accepted-edits", "bypass", "plan", "ask":
+	case "default", "accepted-edits", "bypass", "plan", "ask", "dontask", "bubble":
 		return s
 	default:
 		return ""

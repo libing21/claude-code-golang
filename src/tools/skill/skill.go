@@ -14,20 +14,45 @@ import (
 
 type Input struct {
 	Name string `json:"name"`
+	Args string `json:"args"`
+}
+
+type RunOptions struct {
+	SystemPrompt    []string
+	UserPrompt      string
+	Model           string
+	PermissionMode  string
+	AllowedTools    []string
+	DisallowedTools []string
+	MaxTurns        int
+	IsSubAgent      bool
+}
+
+type RunnerFunc func(ctx context.Context, opts RunOptions) (string, error)
+
+type Config struct {
+	Dirs             []string
+	BaseSystemPrompt []string
+	ParentModel      string
+	ParentMode       string
+	Run              RunnerFunc
 }
 
 type SkillTool struct {
-	dirs []string
+	cfg Config
 }
 
-func New(dirs []string) *SkillTool { return &SkillTool{dirs: dirs} }
+func New(dirs []string) *SkillTool { return &SkillTool{cfg: Config{Dirs: dirs}} }
+
+func NewWithConfig(cfg Config) *SkillTool { return &SkillTool{cfg: cfg} }
 
 func (t *SkillTool) Name() string { return "Skill" }
 
 func (t *SkillTool) Prompt() string {
 	return strings.TrimSpace(`- Executes an installed skill by name.
 - Skills are external capability modules.
-- In Go port, skills are loaded from CLAUDE_GO_SKILLS_DIR when configured.`)
+- Standard skills are loaded from <skill>/SKILL.md and executed in a forked sub-agent.
+- Legacy script skills (<skill>/run.sh) are still supported as a fallback.`)
 }
 
 func (t *SkillTool) InputSchema() json.RawMessage {
@@ -35,7 +60,8 @@ func (t *SkillTool) InputSchema() json.RawMessage {
   "type":"object",
   "additionalProperties":false,
   "properties":{
-    "name":{"type":"string","description":"Skill name"}
+    "name":{"type":"string","description":"Skill name"},
+    "args":{"type":"string","description":"Optional arguments for the skill"}
   },
   "required":["name"]
 }`)
@@ -74,40 +100,86 @@ func (t *SkillTool) Call(ctx context.Context, input any) (tool.ToolResult, error
 	}
 
 	roots := make([]string, 0, 4)
-	if v := strings.TrimSpace(os.Getenv("CLAUDE_GO_SKILLS_DIR")); v != "" {
-		roots = append(roots, v)
-	}
-	roots = append(roots, t.dirs...)
+	roots = append(roots, configuredRoots(t.cfg.Dirs)...)
 	if len(roots) == 0 {
 		return tool.ToolResult{IsError: true, Content: "no skill dirs configured: set CLAUDE_GO_SKILLS_DIR or pass --skill-dir"}, nil
 	}
 
-	var entry string
-	for _, dir := range roots {
-		dir = strings.TrimSpace(dir)
-		if dir == "" {
-			continue
-		}
-		cand := filepath.Join(dir, in.Name, "run.sh")
-		if _, err := os.Stat(cand); err == nil {
-			entry = cand
-			break
-		}
-		cand = filepath.Join(dir, in.Name)
-		if _, err := os.Stat(cand); err == nil {
-			entry = cand
-			break
-		}
-	}
-	if entry == "" {
+	def, ok := ResolveSkill(t.cfg.Dirs, in.Name)
+	if !ok {
 		return tool.ToolResult{IsError: true, Content: "skill not found: " + in.Name}, nil
 	}
 
-	cmd := exec.CommandContext(ctx, "bash", "-lc", entry)
+	if def.Kind == "markdown" {
+		if t.cfg.Run == nil {
+			return tool.ToolResult{IsError: true, Content: "skill runtime is not configured (missing runner)"}, nil
+		}
+		finalContent := buildSkillPromptContent(def)
+
+		model := strings.TrimSpace(def.Model)
+		if model == "" || strings.EqualFold(model, "inherit") {
+			model = strings.TrimSpace(t.cfg.ParentModel)
+		}
+		permissionMode := strings.TrimSpace(def.PermissionMode)
+		if permissionMode == "" {
+			permissionMode = strings.TrimSpace(t.cfg.ParentMode)
+		}
+		maxTurns := def.MaxTurns
+		if maxTurns <= 0 {
+			maxTurns = 4
+		}
+		userPrompt := strings.TrimSpace(in.Args)
+		if userPrompt == "" {
+			userPrompt = "Execute this skill and return the result."
+		}
+		out, err := t.cfg.Run(ctx, RunOptions{
+			SystemPrompt:    append(append([]string{}, t.cfg.BaseSystemPrompt...), finalContent),
+			UserPrompt:      userPrompt,
+			Model:           model,
+			PermissionMode:  permissionMode,
+			AllowedTools:    def.Tools,
+			DisallowedTools: def.DisallowedTools,
+			MaxTurns:        maxTurns,
+			IsSubAgent:      true,
+		})
+		if err != nil {
+			return tool.ToolResult{IsError: true, Content: "skill failed: " + err.Error()}, nil
+		}
+		return tool.ToolResult{Content: out}, nil
+	}
+
+	entry := def.Entry
+	if entry == "" {
+		entry = filepath.Join(def.Dir, in.Name, "run.sh")
+	}
+	cmd := exec.CommandContext(ctx, "bash", "-lc", shellEscape(entry)+" "+shellEscape(strings.TrimSpace(in.Args)))
 	cmd.Env = append(os.Environ(), "PAGER=cat")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return tool.ToolResult{IsError: true, Content: fmt.Sprintf("skill failed: %s\n%s", err.Error(), string(out))}, nil
 	}
 	return tool.ToolResult{Content: string(out)}, nil
+}
+
+func buildSkillPromptContent(def Definition) string {
+	body := strings.TrimSpace(def.Body)
+	dir := filepath.Clean(def.Dir)
+	dirForPrompt := filepath.ToSlash(dir)
+	if dirForPrompt == "." || dirForPrompt == "" {
+		dirForPrompt = dir
+	}
+	body = strings.ReplaceAll(body, "${CLAUDE_SKILL_DIR}", dirForPrompt)
+	sessionID := strings.TrimSpace(os.Getenv("CLAUDE_SESSION_ID"))
+	if sessionID == "" {
+		sessionID = "go-session"
+	}
+	body = strings.ReplaceAll(body, "${CLAUDE_SESSION_ID}", sessionID)
+	return "Base directory for this skill: " + dirForPrompt + "\n\n" + body
+}
+
+func shellEscape(s string) string {
+	if s == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }

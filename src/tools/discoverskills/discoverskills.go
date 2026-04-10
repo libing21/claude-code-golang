@@ -3,12 +3,10 @@ package discoverskills
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 
 	"claude-code-running-go/src/tool"
+	skilltool "claude-code-running-go/src/tools/skill"
 )
 
 // DiscoverSkills is a minimal Go analog of TS DiscoverSkills tool.
@@ -44,55 +42,21 @@ func (t *DiscoverSkillsTool) CheckPermissions(_ context.Context, _ any, _ tool.P
 
 func (t *DiscoverSkillsTool) Call(_ context.Context, input any) (tool.ToolResult, error) {
 	_ = input
-	roots := make([]string, 0, 4)
-	if v := strings.TrimSpace(os.Getenv("CLAUDE_GO_SKILLS_DIR")); v != "" {
-		roots = append(roots, v)
-	}
-	roots = append(roots, t.roots...)
-	if len(roots) == 0 {
+	skills := skilltool.ListSkills(t.roots)
+	if len(skills) == 0 {
 		return tool.ToolResult{Content: "No skill directories configured."}, nil
 	}
-
-	names := make([]string, 0, 32)
-	seen := map[string]struct{}{}
-	for _, r := range roots {
-		r = strings.TrimSpace(r)
-		if r == "" {
-			continue
+	lines := make([]string, 0, len(skills))
+	for _, s := range skills {
+		line := "- " + s.Name
+		if desc := strings.TrimSpace(s.Description); desc != "" {
+			line += " — " + desc
+		} else if s.Kind == "markdown" {
+			line += " — standard SKILL.md"
+		} else {
+			line += " — script skill"
 		}
-		entries, err := os.ReadDir(r)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			name := e.Name()
-			if name == "" {
-				continue
-			}
-			// Require either <skill>/run.sh or <skill> executable.
-			if _, err := os.Stat(filepath.Join(r, name, "run.sh")); err == nil {
-				if _, ok := seen[name]; !ok {
-					seen[name] = struct{}{}
-					names = append(names, name)
-				}
-				continue
-			}
-			if _, err := os.Stat(filepath.Join(r, name)); err == nil {
-				if _, ok := seen[name]; !ok {
-					seen[name] = struct{}{}
-					names = append(names, name)
-				}
-				continue
-			}
-		}
+		lines = append(lines, line)
 	}
-	sort.Strings(names)
-	if len(names) == 0 {
-		return tool.ToolResult{Content: "No skills found."}, nil
-	}
-	return tool.ToolResult{Content: "Discovered skills:\n- " + strings.Join(names, "\n- ")}, nil
+	return tool.ToolResult{Content: "Discovered skills:\n" + strings.Join(lines, "\n")}, nil
 }
-
