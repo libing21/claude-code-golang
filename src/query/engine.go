@@ -147,6 +147,8 @@ func (e *QueryEngine) initTranscript() error {
 	if err != nil {
 		return err
 	}
+	// Apply last compaction marker so resumed sessions don't resurrect omitted messages.
+	msgs = applyLastCompactionMarker(msgs)
 	e.msgs = append(e.msgs, msgs...)
 	e.toolBudget = ReconstructToolBudgetState(e.msgs)
 	return nil
@@ -242,7 +244,8 @@ func (e *QueryEngine) injectRelevantMemories(ctx context.Context, userPrompt str
 	}
 	cwd, _ := os.Getwd()
 	memoryDir := memdir.GetAutoMemPath(cwd)
-	rels, _ := memdir.FindRelevantMemories(ctx, e.cfg.Client, userPrompt, memoryDir, nil, nil)
+	already := scanAlreadySurfacedMemoryPaths(e.msgs)
+	rels, _ := memdir.FindRelevantMemories(ctx, e.cfg.Client, userPrompt, memoryDir, nil, already)
 	extracted, _ := memdir.ExtractRelevantMemories(ctx, rels)
 	e.appendMessages(e.attachmentReg.BuildMessages(attachments.Context{
 		RelevantMemories: extracted,
@@ -269,6 +272,10 @@ func (e *QueryEngine) runSteps(ctx context.Context) (Output, error) {
 func (e *QueryEngine) step(ctx context.Context, step int, finalTexts *[]string) (bool, error) {
 	if compacted, info := maybeCompactMessages(e.msgs, e.cfg.AutoCompactTokenThreshold, e.cfg.AutoCompactKeepMessages); info != nil && info.Triggered {
 		e.msgs = compacted
+		// Record the compaction marker in transcript so resume can restore the same boundary.
+		if e.transcript != nil && len(compacted) > 0 {
+			_ = e.transcript.Append([]api.Message{compacted[0]})
+		}
 		if e.cfg.Debug {
 			fmt.Fprintf(os.Stderr, "[debug] compact triggered step=%d omitted=%d est_tokens=%d\n", step, info.OmittedCount, info.EstimatedTokens)
 		}
@@ -282,7 +289,7 @@ func (e *QueryEngine) step(ctx context.Context, step int, finalTexts *[]string) 
 		e.lastEmittedDate = currentDate
 	}
 	if e.cfg.Debug {
-		fmt.Fprintf(os.Stderr, "[debug] step=%d messages=%v\n", step, e.msgs)
+		fmt.Fprintf(os.Stderr, "[debug] step=%d messages=%d\n", step, len(e.msgs))
 	}
 
 	modelUsed := e.modelUsedForTurn()

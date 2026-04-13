@@ -16,6 +16,7 @@ import (
 	"claude-code-running-go/src/tools/filewrite"
 	"claude-code-running-go/src/tools/glob"
 	"claude-code-running-go/src/tools/grep"
+	"claude-code-running-go/src/tools/memorywrite"
 	"claude-code-running-go/src/tools/skill"
 	"claude-code-running-go/src/tools/todowrite"
 	toolsearchtool "claude-code-running-go/src/tools/toolsearch"
@@ -72,6 +73,7 @@ func (b DefaultRegistryBuilder) Build(ctx context.Context, cfg QueryEngineConfig
 		todowrite.New(),
 		askuserquestion.New(),
 		discoverskills.New(cfg.SkillDirs),
+		memorywrite.New(),
 		agent.NewWithConfig(agent.Config{
 			BaseSystemPrompt: systemPrompt,
 			ParentModel:      resolveModel(cfg),

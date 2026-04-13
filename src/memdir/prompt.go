@@ -162,7 +162,7 @@ func BuildMemoryPrompt(cwd string) string {
 		"# Memory",
 		"",
 		fmt.Sprintf("You have a persistent, file-based memory system with two directories: a private directory at `%s` and a shared team directory at `%s`.", autoDir, teamDir),
-		"Both directories already exist — write to them directly with the Write tool (do not run mkdir or check for their existence).",
+		"Both directories already exist — write to them directly with the Write tool (do not run mkdir or check for their existence). If available, prefer the MemoryWrite tool to ensure correct formatting and index updates.",
 		"",
 		"If the user explicitly asks you to remember something, save it immediately. If they ask you to forget something, find and remove the relevant entry.",
 		"",
